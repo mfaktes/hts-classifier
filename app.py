@@ -13,7 +13,7 @@ import pandas as pd
 import io
 from pathlib import Path
 
-from classifier import classify, chapter_notes_url, get_chapter
+from classifier import classify, chapter_notes_url, get_chapter, get_heading
 from database import init_db, save_classification, get_all_classifications
 
 # ---------------------------------------------------------------------------
@@ -148,8 +148,9 @@ if query:
                     st.caption("No specific attribute matches; ranked on text similarity only.")
 
             chapter = get_chapter(top['hts_code'])
+            heading = get_heading(top['hts_code'])
             st.markdown(
-                f"📖 [View Chapter {chapter} on official HTSUS →]({chapter_notes_url(top['hts_code'])})"
+                f"📖 [View {top['hts_code']} on official HTSUS →]({chapter_notes_url(top['hts_code'])})"
             )
 
             # Save form
@@ -190,7 +191,8 @@ if query:
                         st.caption("Reasons: " + " · ".join(r['reasons']))
 
                     chapter = get_chapter(r['hts_code'])
-                    st.markdown(f"📖 [Chapter {chapter} reference →]({chapter_notes_url(r['hts_code'])})")
+                    heading = get_heading(r['hts_code'])
+                    st.markdown(f"📖 [View {r['hts_code']} on HTSUS →]({chapter_notes_url(r['hts_code'])})")
 
                     # Override save — track when users pick something other than the top
                     if st.button(f"Save as override (override top suggestion)", key=f"save_{i}"):
@@ -214,5 +216,6 @@ st.caption(
     "Built as a trade compliance portfolio project. Data source: "
     "U.S. International Trade Commission HTSUS. "
     "[hts.usitc.gov](https://hts.usitc.gov) · "
-    "Classifications are suggestions only and do not constitute legal advice."
+    "Classifications are suggestions only and do not constitute legal advice. " \
+    "A work in progress to show that human intervention and generalization can be hard to capture at 100%"
 )

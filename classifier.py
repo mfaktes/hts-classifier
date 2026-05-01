@@ -70,6 +70,122 @@ PRODUCT_HINTS = {
     "tire", "tires", "wheel",
 }
 
+# ---------------------------------------------------------------------------
+# SYNONYM LAYER — bridge everyday English to formal HTSUS vocabulary
+# ---------------------------------------------------------------------------
+# HTSUS uses customs-formal terms ("footwear", "automatic data processing
+# machine") while users search in everyday English ("shoe", "laptop"). This
+# dictionary maps common search terms to the actual words used in HTSUS
+# descriptions so the matcher can find the right codes.
+#
+# Each entry is verified against the HTSUS dataset — every target term on the
+# right side actually appears in real HTSUS descriptions. Add new mappings
+# here whenever you find a misclassification rooted in vocabulary mismatch.
+# ---------------------------------------------------------------------------
+SYNONYMS = {
+    # Footwear (chapter 64 uses "footwear", never "shoe")
+    "shoe":      ["footwear"],
+    "shoes":     ["footwear"],
+    "sneaker":   ["footwear", "sports"],
+    "sneakers":  ["footwear", "sports"],
+    "trainer":   ["footwear", "sports"],
+    "trainers":  ["footwear", "sports"],
+
+    # Wallets/purses (4202.31 = "articles normally carried in the pocket or in the handbag")
+    "wallet":    ["pocket", "handbag"],
+    "wallets":   ["pocket", "handbag"],
+    "billfold":  ["pocket", "handbag"],
+    "purse":     ["handbag", "pocket"],
+
+    # Phones (8517 uses "telephones", "smartphones")
+    "phone":     ["telephone", "smartphone"],
+    "phones":    ["telephone", "smartphone"],
+    "cellphone": ["telephone", "smartphone"],
+    "mobile":    ["telephone", "smartphone"],
+    "smartphone":["telephone"],   # bridge to chapter 8517
+
+    # Computers (8471 uses "portable automatic data processing")
+    # Use "portable" only — generic words like "data" or "processing" caused false positives
+    "laptop":    ["portable"],
+    "laptops":   ["portable"],
+    "computer":  ["portable"],
+    "computers": ["portable"],
+    "pc":        ["portable"],
+
+    # Television (8528 = reception apparatus FOR TELEVISION; we want both words to differentiate from radio reception)
+    "tv":        ["television"],
+    "tvs":       ["television"],
+
+    # Apparel terms HTSUS uses formally
+    "hoodie":    ["sweatshirt", "pullover"],
+    "hoodies":   ["sweatshirt", "pullover"],
+    "tee":       ["t-shirt", "singlet"],
+    "tshirt":    ["t-shirt"],
+
+    # Audio gear (8518 uses "headphones", "earphones")
+    "earbud":    ["earphone", "headphone"],
+    "earbuds":   ["earphone", "headphone"],
+    "airpods":   ["earphone", "headphone"],
+    "headset":   ["headphone", "earphone"],
+    "headsets":  ["headphone", "earphone"],
+
+    # Eyewear (9004 uses "spectacles")
+    "glasses":   ["spectacles", "eyewear"],
+    "eyeglasses":["spectacles", "eyewear"],
+
+    # Watches (chapter 91 uses "watch", "wrist")
+    "wristwatch":["watch", "wrist"],
+    "wristwatches":["watch", "wrist"],
+
+    # Lighting (9405 uses "lamps", "luminaires")
+    "bulb":      ["lamp", "luminaire"],
+    "bulbs":     ["lamp", "luminaire"],
+    "light":     ["lamp", "luminaire"],
+    "lights":    ["lamp", "luminaire"],
+
+    # Vehicles (chapter 87)
+    "car":       ["vehicle", "automobile"],
+    "cars":      ["vehicle", "automobile"],
+    "truck":     ["vehicle"],
+    "trucks":    ["vehicle"],
+    "bike":      ["bicycle"],
+    "bikes":     ["bicycle"],
+
+    # Tires
+    "tire":      ["pneumatic"],
+    "tires":     ["pneumatic"],
+    "tyre":      ["pneumatic"],
+    "tyres":     ["pneumatic"],
+
+    # Furniture (9401 uses "seats" not "chairs")
+    "chair":     ["seat"],
+    "chairs":    ["seat"],
+
+    # Jewelry
+    "jewellery": ["jewelry"],
+
+    # Floor coverings (chapter 57 uses "carpets")
+    "rug":       ["carpet"],
+    "rugs":      ["carpet"],
+}
+
+
+def expand_with_synonyms(tokens: list[str]) -> tuple[list[str], dict]:
+    """
+    Expand a list of query tokens to include synonym matches.
+    Returns (expanded_tokens, synonym_map) where synonym_map records
+    which originals produced which expansions (for transparent reasoning).
+    """
+    expanded = list(tokens)
+    syn_map = {}
+    for tok in tokens:
+        if tok in SYNONYMS:
+            for synonym in SYNONYMS[tok]:
+                if synonym not in expanded:
+                    expanded.append(synonym)
+                    syn_map.setdefault(tok, []).append(synonym)
+    return expanded, syn_map
+
 # English stopwords we don't want to match on
 STOPWORDS = {
     "a", "an", "the", "for", "of", "in", "on", "with", "and", "or",
@@ -121,17 +237,37 @@ def extract_attributes(query: str) -> dict:
 # Scoring
 # ---------------------------------------------------------------------------
 
+def _matches_token(query_token: str, desc_tokens: set, desc_lower: str) -> bool:
+    """
+    Check if a query token matches a description.
+    Handles common singular/plural variation: 'bicycle' matches 'bicycles',
+    'shoe' matches 'shoes'. Avoids false positives by only checking obvious
+    plural forms (+s, +es) — not arbitrary substrings.
+    """
+    if query_token in desc_tokens:
+        return True
+    # Try common plural forms
+    if (query_token + "s") in desc_tokens:
+        return True
+    if (query_token + "es") in desc_tokens:
+        return True
+    # Try removing trailing 's' (e.g., 'shoes' → check 'shoe')
+    if query_token.endswith("s") and query_token[:-1] in desc_tokens:
+        return True
+    return False
+
+
 def score_row(query_tokens: list[str], attrs: dict, full_desc: str) -> tuple[float, list[str]]:
     """
     Score one HTS row against the user's query.
     Returns (score 0-100, list of reasons explaining the score).
 
     Scoring philosophy:
-      - Reward when ALL query tokens appear (not just some)
+      - Reward when ALL query tokens (or their synonyms) appear
       - Reward attribute matches heavily (material, product type, gender)
       - Reward matches at the HEADING level much more than deep-subcategory matches
-        (e.g., 'vacuum' matching the heading 'Vacuum cleaners' beats it matching
-        a footnote about glass vacuum flasks)
+      - Use synonym expansion to bridge everyday words to formal HTSUS vocabulary
+      - Handle singular/plural naturally for both originals and synonyms
       - Penalize long, sprawling descriptions where matches are incidental
     """
     desc_lower = full_desc.lower()
@@ -139,30 +275,52 @@ def score_row(query_tokens: list[str], attrs: dict, full_desc: str) -> tuple[flo
     reasons = []
     score = 0.0
 
+    # Expand query tokens with synonyms — 'shoe' also looks for 'footwear', etc.
+    expanded_tokens, syn_map = expand_with_synonyms(query_tokens)
+
     # Split the hierarchical description into levels.
-    # Level 0 = heading (chapter top), Level N = deepest subcategory.
-    # full_description format: "Heading > Subheading > ... > Statistical line"
     levels = [lvl.strip().lower() for lvl in full_desc.split(">")]
 
-    # 1. Token overlap — reward both coverage AND completeness
-    matched_tokens = [t for t in query_tokens if t in desc_tokens]
+    # 1. Token overlap — handles plurals for originals; substring for synonyms
+    matched_originals = [t for t in query_tokens if _matches_token(t, desc_tokens, desc_lower)]
+    matched_synonyms = []
+    for t in expanded_tokens:
+        if t in query_tokens:
+            continue
+        if t in desc_lower:
+            matched_synonyms.append(t)
+
     if query_tokens:
-        coverage = len(matched_tokens) / len(query_tokens)
+        covered = set()
+        for orig in query_tokens:
+            if _matches_token(orig, desc_tokens, desc_lower):
+                covered.add(orig)
+            elif orig in SYNONYMS:
+                if any(syn in desc_lower for syn in SYNONYMS[orig]):
+                    covered.add(orig)
+        coverage = len(covered) / len(query_tokens)
         score += (coverage ** 1.5) * 35
-        if matched_tokens:
-            reasons.append(f"Matched terms: {', '.join(matched_tokens)}")
+
+        if matched_originals:
+            reasons.append(f"Matched terms: {', '.join(matched_originals)}")
+        if matched_synonyms:
+            bridge_notes = []
+            for syn in matched_synonyms:
+                originals = [orig for orig, syns in syn_map.items() if syn in syns]
+                if originals:
+                    bridge_notes.append(f"{originals[0]}→{syn}")
+            if bridge_notes:
+                reasons.append(f"Synonym match: {', '.join(bridge_notes)}")
+
         if coverage == 0:
             return 0.0, []
 
-    # 2. HEADING-LEVEL MATCH BONUS — the most important signal
-    # If a query token appears in the heading (level 0), the row is "about" that
-    # concept, not just incidentally mentioning it. This is what differentiates
-    # 8508 (Vacuum cleaners) from 7020 (Glass... > vacuum flasks) for a 'vacuum' query.
-    if levels and query_tokens:
+    # 2. HEADING-LEVEL MATCH BONUS — including synonyms (substring against heading)
+    if levels and expanded_tokens:
         heading = levels[0]
-        heading_matches = [t for t in query_tokens if t in heading]
+        heading_matches = [t for t in expanded_tokens if t in heading]
         if heading_matches:
-            score += 25  # big bonus for being in the heading itself
+            score += 25
             reasons.append(f"Heading-level match: {', '.join(heading_matches)}")
 
     # 3. Material match — apply canonical form for stems like 'wooden' -> 'wood'
@@ -187,24 +345,51 @@ def score_row(query_tokens: list[str], attrs: dict, full_desc: str) -> tuple[flo
                 score += 10
                 reasons.append(f"Construction: '{con}'")
 
-    # 6. Product type — strongest single signal
+    # 6. Product type — strongest single signal (also expands via synonyms)
     if attrs["products"]:
         for prod in attrs["products"]:
             singular = prod.rstrip("s")
+            # Direct product hit
             if prod in desc_lower or singular in desc_lower:
                 score += 20
                 reasons.append(f"Product type: '{prod}'")
+            # Synonym product hit (e.g. 'shoe' product, but description says 'footwear')
+            elif prod in SYNONYMS:
+                for syn in SYNONYMS[prod]:
+                    if syn in desc_lower:
+                        score += 18  # slightly less than direct match
+                        reasons.append(f"Product (synonym): '{prod}'→'{syn}'")
+                        break
 
     # 7. Fuzzy similarity bonus for spelling variations
-    fuzzy = fuzz.token_set_ratio(" ".join(query_tokens), desc_lower)
+    fuzzy = fuzz.token_set_ratio(" ".join(expanded_tokens), desc_lower)
     score += (fuzzy / 100) * 8
 
-    # 8. Description length penalty — focused descriptions beat sprawling ones.
+    # 8. Description length penalty
     desc_word_count = len(desc_lower.split())
     if desc_word_count > 25:
         score -= min((desc_word_count - 25) * 0.4, 12)
 
     return min(max(score, 0), 100), reasons
+
+
+def is_supplemental_chapter(hts_code: str) -> bool:
+    """
+    Chapters 98 and 99 are supplemental tariff schedules, not primary
+    classifications. Specifically:
+      - 9802: Articles returned to the U.S. after processing abroad
+      - 9817: Special imports (like prototypes for testing)
+      - 9902: Temporary Reductions in Duties (Miscellaneous Tariff Bill)
+      - 9903: Additional Duties (Section 301 China, Section 232 steel/aluminum)
+    A real product is primary-classified in chapters 1-97 and then
+    additionally checked against these supplemental chapters. We penalize
+    them so they don't outrank the primary classification.
+    """
+    digits = hts_code.replace('.', '')
+    if not digits:
+        return False
+    chapter = digits[:2]
+    return chapter in ('98', '99')
 
 
 def confidence_band(score: float) -> str:
@@ -233,12 +418,13 @@ def classify(query: str, df: pd.DataFrame, top_n: int = 10) -> list[dict]:
 
     query_tokens = tokenize(query)
     attrs = extract_attributes(query)
+    expanded_tokens, _ = expand_with_synonyms(query_tokens)
 
-    # Pre-filter: rows must contain at least one query token
+    # Pre-filter: rows must contain at least one query token OR synonym
     # (massive speedup vs scoring all 29k rows)
-    if query_tokens:
+    if expanded_tokens:
         mask = df['full_description'].str.lower().apply(
-            lambda d: any(t in d for t in query_tokens) if isinstance(d, str) else False
+            lambda d: any(t in d for t in expanded_tokens) if isinstance(d, str) else False
         )
         candidates = df[mask].copy()
     else:
@@ -247,8 +433,22 @@ def classify(query: str, df: pd.DataFrame, top_n: int = 10) -> list[dict]:
     # Score every candidate
     scores = []
     reasons_list = []
-    for desc in candidates['full_description']:
+    for _, candidate_row in candidates.iterrows():
+        desc = candidate_row['full_description']
+        code = str(candidate_row['HTS Number'])
         s, r = score_row(query_tokens, attrs, str(desc))
+
+        # Penalty for supplemental tariff chapters (98, 99) — these are
+        # not primary classifications and should only surface when nothing
+        # else matches. Apply a heavy penalty unless the user explicitly
+        # asked for these chapters.
+        if is_supplemental_chapter(code) and not any(
+            t in ("9802", "9817", "9902", "9903", "98", "99") for t in query_tokens
+        ):
+            s = s * 0.5
+            if r:
+                r = r + ["Supplemental tariff schedule (penalty applied)"]
+
         scores.append(s)
         reasons_list.append(r)
     candidates['score'] = scores
@@ -284,10 +484,18 @@ def get_chapter(hts_code: str) -> str:
     return digits[:2] if len(digits) >= 2 else ""
 
 
+def get_heading(hts_code: str) -> str:
+    """Extract the 4-digit heading from an HTS code (e.g. '6403' from '6403.19.50.00')."""
+    digits = hts_code.replace('.', '')
+    return digits[:4] if len(digits) >= 4 else digits
+
+
 def chapter_notes_url(hts_code: str) -> str:
-    """Build a deep link to the official USITC chapter page."""
-    chapter = get_chapter(hts_code)
-    if not chapter:
+    """
+    Build a deep link to the official USITC HTSUS site landing on the exact
+    subheading for the suggested code. The /search?query= path lets us pass
+    the full HTS code and land directly on that entry's context.
+    """
+    if not hts_code or not hts_code.strip():
         return "https://hts.usitc.gov/"
-    # USITC search supports filtering by chapter
-    return f"https://hts.usitc.gov/search?query={chapter}"
+    return f"https://hts.usitc.gov/search?query={hts_code.strip()}"
