@@ -493,9 +493,10 @@ def get_heading(hts_code: str) -> str:
 def chapter_notes_url(hts_code: str) -> str:
     """
     Build a deep link to the official USITC HTSUS site landing on the exact
-    subheading for the suggested code. The /search?query= path lets us pass
-    the full HTS code and land directly on that entry's context.
+    subheading for the suggested code. Using the /search?query= path with the
+    full HTS code (e.g. 6403.19.50) lands users directly on that entry's
+    context — duty rate, statistical breakouts, sibling entries.
     """
-    if not hts_code or not hts_code.strip():
+    if not hts_code or not str(hts_code).strip():
         return "https://hts.usitc.gov/"
-    return f"https://hts.usitc.gov/search?query={hts_code.strip()}"
+    return f"https://hts.usitc.gov/search?query={str(hts_code).strip()}"
