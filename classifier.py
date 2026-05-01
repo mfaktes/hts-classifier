@@ -129,28 +129,43 @@ def score_row(query_tokens: list[str], attrs: dict, full_desc: str) -> tuple[flo
     Scoring philosophy:
       - Reward when ALL query tokens appear (not just some)
       - Reward attribute matches heavily (material, product type, gender)
-      - Penalize long, sprawling descriptions where the matched terms are
-        incidental (e.g., a "suit" entry that mentions "shirt" deep in its
-        hierarchy shouldn't outrank a dedicated "shirt" entry)
+      - Reward matches at the HEADING level much more than deep-subcategory matches
+        (e.g., 'vacuum' matching the heading 'Vacuum cleaners' beats it matching
+        a footnote about glass vacuum flasks)
+      - Penalize long, sprawling descriptions where matches are incidental
     """
     desc_lower = full_desc.lower()
     desc_tokens = set(tokenize(full_desc))
     reasons = []
     score = 0.0
 
+    # Split the hierarchical description into levels.
+    # Level 0 = heading (chapter top), Level N = deepest subcategory.
+    # full_description format: "Heading > Subheading > ... > Statistical line"
+    levels = [lvl.strip().lower() for lvl in full_desc.split(">")]
+
     # 1. Token overlap — reward both coverage AND completeness
     matched_tokens = [t for t in query_tokens if t in desc_tokens]
     if query_tokens:
         coverage = len(matched_tokens) / len(query_tokens)
-        # All terms matched -> 35 points; half matched -> ~12 points (squared curve)
         score += (coverage ** 1.5) * 35
         if matched_tokens:
             reasons.append(f"Matched terms: {', '.join(matched_tokens)}")
-        # Heavy penalty if NO query tokens matched at all
         if coverage == 0:
             return 0.0, []
 
-    # 2. Material match — apply canonical form for stems like 'wooden' -> 'wood'
+    # 2. HEADING-LEVEL MATCH BONUS — the most important signal
+    # If a query token appears in the heading (level 0), the row is "about" that
+    # concept, not just incidentally mentioning it. This is what differentiates
+    # 8508 (Vacuum cleaners) from 7020 (Glass... > vacuum flasks) for a 'vacuum' query.
+    if levels and query_tokens:
+        heading = levels[0]
+        heading_matches = [t for t in query_tokens if t in heading]
+        if heading_matches:
+            score += 25  # big bonus for being in the heading itself
+            reasons.append(f"Heading-level match: {', '.join(heading_matches)}")
+
+    # 3. Material match — apply canonical form for stems like 'wooden' -> 'wood'
     if attrs["materials"]:
         for mat in attrs["materials"]:
             canonical = MATERIAL_CANONICAL.get(mat, mat)
@@ -158,21 +173,21 @@ def score_row(query_tokens: list[str], attrs: dict, full_desc: str) -> tuple[flo
                 score += 22
                 reasons.append(f"Material match: '{canonical}'")
 
-    # 3. Gender match
+    # 4. Gender match
     if attrs["gender"]:
         gender_root = attrs["gender"].rstrip("'s").rstrip("'")
         if gender_root in desc_lower:
             score += 18
             reasons.append(f"Gender match: {attrs['gender']}")
 
-    # 4. Construction match (knit, woven, etc.)
+    # 5. Construction match (knit, woven, etc.)
     if attrs["construction"]:
         for con in attrs["construction"]:
             if con in desc_lower:
                 score += 10
                 reasons.append(f"Construction: '{con}'")
 
-    # 5. Product type — strongest single signal
+    # 6. Product type — strongest single signal
     if attrs["products"]:
         for prod in attrs["products"]:
             singular = prod.rstrip("s")
@@ -180,13 +195,11 @@ def score_row(query_tokens: list[str], attrs: dict, full_desc: str) -> tuple[flo
                 score += 20
                 reasons.append(f"Product type: '{prod}'")
 
-    # 6. Fuzzy similarity bonus for spelling variations
+    # 7. Fuzzy similarity bonus for spelling variations
     fuzzy = fuzz.token_set_ratio(" ".join(query_tokens), desc_lower)
     score += (fuzzy / 100) * 8
 
-    # 7. Description length penalty — focused descriptions beat sprawling ones.
-    # A short description like "Of cotton > Men's" matching is far more
-    # confident than a 30-word ensemble description that happens to mention shirts.
+    # 8. Description length penalty — focused descriptions beat sprawling ones.
     desc_word_count = len(desc_lower.split())
     if desc_word_count > 25:
         score -= min((desc_word_count - 25) * 0.4, 12)
